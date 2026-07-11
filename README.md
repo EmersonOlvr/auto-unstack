@@ -7,6 +7,7 @@ Auto Unstack is a lightweight utility that monitors the notification shade and a
 ## Features
 
 - 🔄 **Automatic expansion** — Grouped notifications expand instantly when the notification shade opens
+- 🔒 **Lock-screen safe** — Does nothing while the device is locked (avoids PIN pad / lock-screen conflicts)
 - 🔋 **Lightweight** — Minimal battery impact with smart event filtering
 - 🛡️ **Privacy-first** — No personal data collection or network access
 - ⚙️ **Simple settings** — Single toggle to enable/disable
@@ -15,13 +16,14 @@ Auto Unstack is a lightweight utility that monitors the notification shade and a
 ## How It Works
 
 Auto Unstack uses Android's AccessibilityService to:
-1. Monitor the notification shade state
-2. Detect numeric badges on grouped notifications (e.g., "2", "5", "12")
-3. Identify clickable notification containers on the right side of the screen
-4. Automatically tap to expand the grouped notification stack
-5. Apply intelligent cooldown to prevent accidental double-clicks
+1. Skip all processing while the keyguard is locked
+2. Monitor the notification shade when SystemUI is the active window
+3. Detect numeric badges on grouped notifications (e.g., "2", "5", "12")
+4. Identify clickable notification containers on the right side of the screen
+5. Automatically tap once per shade open to expand grouped stacks
+6. Ignore further events until the shade is dismissed (prevents re-open loops)
 
-The service runs only when the notification shade is active and stops processing once notifications are expanded.
+The service only acts when the unlocked notification shade is active. After expanding, it waits until you close the shade before acting again.
 
 ## Accessibility Permission
 
@@ -49,6 +51,7 @@ See [Android Accessibility Service documentation](https://developer.android.com/
 The app only accesses:
 - Notification UI structure (to find badges)
 - Notification shade state
+- Keyguard / lock state (to avoid acting on the lock screen)
 - Screen dimensions
 
 ## Installation
@@ -157,6 +160,7 @@ auto-unstack/
 
 - **Works with Samsung notifications** — Designed specifically for Samsung's grouped notification stacks
 - **Requires Accessibility Service** — Cannot function without this permission
+- **Unlocked shade only** — Does not expand stacks on the lock screen; pull down the shade after unlocking
 - **Limited to notification shade** — Does not work when the shade is closed
 - **No root required** — Uses standard Android Accessibility APIs
 
