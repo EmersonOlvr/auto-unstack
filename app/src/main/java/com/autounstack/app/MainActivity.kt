@@ -11,6 +11,8 @@ import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.padding
+import androidx.compose.foundation.rememberScrollState
+import androidx.compose.foundation.verticalScroll
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.Switch
 import androidx.compose.material3.Text
@@ -43,18 +45,17 @@ private fun AppContent(preferencesManager: PreferencesManager) {
         Column(
             modifier = Modifier
                 .fillMaxSize()
+                .verticalScroll(rememberScrollState())
                 .padding(16.dp),
             verticalArrangement = Arrangement.Center,
             horizontalAlignment = Alignment.Start
         ) {
-            // Title
             Text(
                 text = "Auto Unstack",
                 fontSize = 28.sp,
                 modifier = Modifier.padding(bottom = 8.dp)
             )
 
-            // Description
             Text(
                 text = "Automatically expands grouped Samsung notifications using Android Accessibility Service. No personal data is collected.",
                 fontSize = 14.sp,
@@ -63,7 +64,6 @@ private fun AppContent(preferencesManager: PreferencesManager) {
                     .fillMaxWidth()
             )
 
-            // Toggle Switch
             Row(
                 modifier = Modifier
                     .fillMaxWidth()
@@ -86,34 +86,44 @@ private fun AppContent(preferencesManager: PreferencesManager) {
 
             Spacer(modifier = Modifier.height(16.dp))
 
-            // How to use section
             Text(
-                text = "How to use:",
+                text = "How to set up:",
                 fontSize = 14.sp,
                 modifier = Modifier.padding(bottom = 8.dp)
             )
 
             Text(
-                text = "1. Enable Accessibility Service",
+                text = "1. Install the APK (you may need to pause Play Protect temporarily).",
                 fontSize = 13.sp,
-                modifier = Modifier.padding(bottom = 4.dp)
+                modifier = Modifier.padding(bottom = 6.dp)
             )
 
             Text(
-                text = "2. Pull down notification shade",
+                text = "2. Go to Settings → Apps → Auto Unstack → ⋮ (three dots) → Allow restricted settings.",
                 fontSize = 13.sp,
-                modifier = Modifier.padding(bottom = 4.dp)
+                modifier = Modifier.padding(bottom = 6.dp)
             )
 
             Text(
-                text = "3. Grouped notifications expand automatically",
+                text = "3. Go to Settings → Accessibility → Installed apps → Auto Unstack → turn it on.",
+                fontSize = 13.sp,
+                modifier = Modifier.padding(bottom = 6.dp)
+            )
+
+            Text(
+                text = "4. Open this app and turn on the Enable Auto Unstack switch above.",
+                fontSize = 13.sp,
+                modifier = Modifier.padding(bottom = 6.dp)
+            )
+
+            Text(
+                text = "5. Pull down the notification shade — grouped notifications expand automatically.",
                 fontSize = 13.sp,
                 modifier = Modifier.padding(bottom = 16.dp)
             )
 
-            // Battery optimization note
             Text(
-                text = "Battery optimization may need to be disabled on some Samsung devices.",
+                text = "On some Samsung devices, also disable battery optimization for Auto Unstack so the service stays running.",
                 fontSize = 12.sp,
                 modifier = Modifier
                     .fillMaxWidth()
