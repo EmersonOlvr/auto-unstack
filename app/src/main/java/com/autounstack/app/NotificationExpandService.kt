@@ -1,6 +1,7 @@
 package com.autounstack.app
 
 import android.accessibilityservice.AccessibilityService
+import android.app.KeyguardManager
 import android.graphics.Rect
 import android.os.SystemClock
 import android.util.Log
@@ -12,10 +13,16 @@ class NotificationExpandService : AccessibilityService() {
     private var lastGlobalClickTime = 0L
     private val GLOBAL_CLICK_COOLDOWN_MS = 450L
     private lateinit var preferencesManager: PreferencesManager
+    private lateinit var keyguardManager: KeyguardManager
+
+    // After we expand stacks once for a shade open, ignore further events until the shade closes.
+    // Prevents re-clicks during dismiss (which re-open the shade).
+    private var hasExpandedThisShadeSession = false
 
     override fun onServiceConnected() {
         super.onServiceConnected()
         preferencesManager = PreferencesManager(this)
+        keyguardManager = getSystemService(KEYGUARD_SERVICE) as KeyguardManager
         Log.i(TAG, "Accessibility service connected")
     }
 
@@ -25,8 +32,46 @@ class NotificationExpandService : AccessibilityService() {
             return
         }
 
+        // Lock screen shares SystemUI and shows numeric PIN / lock-screen notification counts.
+        // Never click there — it can open the shade in a loop and block unlock.
+        if (keyguardManager.isKeyguardLocked) {
+            hasExpandedThisShadeSession = false
+            Log.d(TAG, "Keyguard locked; ignoring event")
+            return
+        }
+
         if (event.eventType != AccessibilityEvent.TYPE_WINDOW_CONTENT_CHANGED &&
             event.eventType != AccessibilityEvent.TYPE_WINDOW_STATE_CHANGED) {
+            return
+        }
+
+        val root = rootInActiveWindow
+        if (root == null) {
+            hasExpandedThisShadeSession = false
+            Log.d(TAG, "No active window root; shade session reset")
+            return
+        }
+
+        val rootPkg = root.packageName?.toString()
+        // Shade is only "open" for us when SystemUI is the active window root.
+        // When the user dismisses the shade, root becomes launcher/app → reset session.
+        if (rootPkg != "com.android.systemui") {
+            if (hasExpandedThisShadeSession) {
+                Log.d(TAG, "Left SystemUI (root=$rootPkg); shade session reset")
+            }
+            hasExpandedThisShadeSession = false
+            return
+        }
+
+        val evPkg = event.packageName?.toString()
+        if (evPkg != null && evPkg != "com.android.systemui") {
+            hasExpandedThisShadeSession = false
+            Log.d(TAG, "Ignoring event from package=$evPkg; shade session reset")
+            return
+        }
+
+        if (hasExpandedThisShadeSession) {
+            Log.d(TAG, "Already expanded this shade session; ignoring")
             return
         }
 
@@ -36,24 +81,11 @@ class NotificationExpandService : AccessibilityService() {
             return
         }
 
-        val root = rootInActiveWindow
-        if (root == null) {
-            Log.d(TAG, "No active window root available for event type ${event.eventType}")
-            return
-        }
-
-        // Only handle events coming from SystemUI
-        val evPkg = event.packageName?.toString()
-        if (evPkg == null || evPkg != "com.android.systemui") {
-            Log.d(TAG, "Ignoring event from package=$evPkg")
-            return
-        }
-
         val screenBounds = Rect()
         root.getBoundsInScreen(screenBounds)
         val screenWidth = screenBounds.width().takeIf { it > 0 } ?: resources.displayMetrics.widthPixels
 
-        Log.d(TAG, "SystemUI event; scanning entire node tree; eventType=${event.eventType}, screenWidth=$screenWidth")
+        Log.d(TAG, "SystemUI event; scanning node tree; eventType=${event.eventType}, screenWidth=$screenWidth")
 
         scanNodeRecursive(root, screenWidth)
     }
@@ -71,7 +103,6 @@ class NotificationExpandService : AccessibilityService() {
             child.recycle()
         }
     }
-
 
     private fun processNode(node: AccessibilityNodeInfo, screenWidth: Int) {
         val text = node.text?.toString()
@@ -103,7 +134,8 @@ class NotificationExpandService : AccessibilityService() {
         val clicked = clickableParent.performAction(AccessibilityNodeInfo.ACTION_CLICK)
         if (clicked) {
             lastGlobalClickTime = SystemClock.uptimeMillis()
-            Log.d(TAG, "Click performed")
+            hasExpandedThisShadeSession = true
+            Log.d(TAG, "Click performed; shade session marked handled")
         } else {
             Log.d(TAG, "Click failed for numeric badge: text=$text")
         }
