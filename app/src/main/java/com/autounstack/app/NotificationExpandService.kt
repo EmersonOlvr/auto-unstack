@@ -11,28 +11,32 @@ import android.view.accessibility.AccessibilityNodeInfo
 class NotificationExpandService : AccessibilityService() {
 
     private val TAG = "NotificationExpandService"
-    // CHANGED: lowered from 450ms — this was adding avoidable delay on
-    // top of the shade's own opening animation. 120ms is enough to avoid
-    // double-firing on the same content-changed event without adding
-    // noticeable lag.
-    private val GLOBAL_CLICK_COOLDOWN_MS = 120L
+
+    // Minimum time after a successful click before we're willing to
+    // click again — gives the expand animation time to settle so we
+    // don't grab a transient badge mid-animation.
+    private val POST_CLICK_SETTLE_MS = 500L
 
     private lateinit var preferencesManager: PreferencesManager
     private lateinit var keyguardManager: KeyguardManager
 
-    // CHANGED: instead of a single boolean that blocks the whole shade
-    // session after the first click, we remember which badges (by their
-    // on-screen bounds) were already clicked this session. New badges that
-    // scroll into view still get expanded; already-clicked ones are skipped
-    // so we don't re-click and re-trigger the shade-reopening loop.
-    private val clickedBadgeBoundsThisSession = mutableSetOf<String>()
-    private var lastGlobalClickTime = 0L
+    // CHANGED: groups we've already expanded this shade-open session,
+    // keyed by stable CONTENT (app name / title text) instead of screen
+    // position. Bounds-based keys broke when the user manually collapsed
+    // a group: the list reflows, the badge reappears at slightly
+    // different coordinates, and the old bounds-based key no longer
+    // matched — so the service treated it as a brand-new badge and
+    // re-expanded it right after the user collapsed it. Content-based
+    // keys survive that reflow, so a group the user (or we) already
+    // expanded stays "handled" for the rest of the session even if it
+    // gets collapsed again.
+    private val handledGroupIdentitiesThisSession = mutableSetOf<String>()
+    private var lastClickTime = 0L
 
     private fun findClickableParent(node: AccessibilityNodeInfo?): AccessibilityNodeInfo? {
         var current = node
         while (current != null) {
             if (current.isClickable) {
-                Log.d(TAG, "Found clickable parent: class=${current.className} clickable=true")
                 return current
             }
             current = current.parent
@@ -48,58 +52,66 @@ class NotificationExpandService : AccessibilityService() {
     private fun isNumericBadgeText(text: String?): Boolean {
         if (text.isNullOrBlank()) return false
         val trimmed = text.trim().toString()
-        val isNumeric = Regex("^[0-9]+$").matches(trimmed)
-        Log.d(TAG, "Numeric badge text check: text=\"$trimmed\" isNumeric=$isNumeric")
-        return isNumeric
+        return Regex("^[0-9]+$").matches(trimmed)
+    }
+
+    /**
+     * Collects text from this node and its descendants (bounded depth)
+     * so we can build a content-based identity for a notification group.
+     */
+    private fun collectTexts(node: AccessibilityNodeInfo, out: MutableList<String>, depth: Int) {
+        if (depth > 6) return
+        val text = node.text?.toString()?.trim()
+        if (!text.isNullOrEmpty()) out.add(text)
+        val desc = node.contentDescription?.toString()?.trim()
+        if (!desc.isNullOrEmpty()) out.add(desc)
+        val childCount = node.childCount
+        for (i in 0 until childCount) {
+            val child = node.getChild(i) ?: continue
+            collectTexts(child, out, depth + 1)
+            child.recycle()
+        }
+    }
+
+    /**
+     * Builds a stable identity for the notification group that owns this
+     * clickable node: its resource id (if any) plus its non-numeric text
+     * content (app name, sender, title). Deliberately excludes purely
+     * numeric strings so a fluctuating unread count doesn't change the
+     * identity.
+     */
+    private fun buildGroupIdentity(clickableParent: AccessibilityNodeInfo): String {
+        val idPart = clickableParent.viewIdResourceName ?: ""
+        val texts = mutableListOf<String>()
+        collectTexts(clickableParent, texts, 0)
+        val stableTexts = texts.filter { !isNumericBadgeText(it) }
+        return "$idPart|${stableTexts.joinToString("|")}"
     }
 
     private fun processNode(node: AccessibilityNodeInfo, screenWidth: Int) {
+        if (SystemClock.uptimeMillis() - lastClickTime < POST_CLICK_SETTLE_MS) return
+
         val text = node.text?.toString()
         if (!isNumericBadgeText(text)) return
-        if (!node.isVisibleToUser) {
-            Log.d(TAG, "Skipping numeric node because it is not visible: text=$text")
-            return
-        }
+        if (!node.isVisibleToUser) return
 
         val bounds = Rect()
         node.getBoundsInScreen(bounds)
+        if (!isNearRightSide(bounds, screenWidth)) return
 
-        if (!isNearRightSide(bounds, screenWidth)) {
-            Log.d(TAG, "Skipping numeric node because it is not near right side: text=$text bounds=$bounds")
+        val clickableParent = findClickableParent(node) ?: return
+
+        val groupIdentity = buildGroupIdentity(clickableParent)
+        if (handledGroupIdentitiesThisSession.contains(groupIdentity)) {
+            // Already expanded (or the user collapsed it back down) this
+            // session — respect that and don't re-click.
             return
         }
 
-        // CHANGED: key each badge by its screen position so we can tell
-        // "already handled" badges apart from newly-visible ones after a
-        // scroll, instead of relying on one global flag.
-        val badgeKey = bounds.flattenToString()
-        if (clickedBadgeBoundsThisSession.contains(badgeKey)) {
-            Log.d(TAG, "Skipping badge already clicked this session: text=$text bounds=$bounds")
-            return
-        }
-
-        // CHANGED: cooldown is now per attempt, not a one-shot gate, so it
-        // just prevents rapid re-firing while still allowing multiple
-        // distinct badges to be expanded in the same shade session.
-        if (SystemClock.uptimeMillis() - lastGlobalClickTime < GLOBAL_CLICK_COOLDOWN_MS) {
-            Log.d(TAG, "Global cooldown active")
-            return
-        }
-
-        Log.d(TAG, "Detected numeric badge node: text=$text bounds=$bounds")
-        val clickableParent = findClickableParent(node)
-        if (clickableParent == null) {
-            Log.d(TAG, "No clickable parent found for numeric badge: text=$text bounds=$bounds")
-            return
-        }
-
-        Log.d(TAG, "Attempting click on clickable parent for numeric badge: text=$text")
         if (clickableParent.performAction(AccessibilityNodeInfo.ACTION_CLICK)) {
-            lastGlobalClickTime = SystemClock.uptimeMillis()
-            clickedBadgeBoundsThisSession.add(badgeKey)
-            Log.d(TAG, "Click performed; badge marked handled (session total=${clickedBadgeBoundsThisSession.size})")
-        } else {
-            Log.d(TAG, "Click failed for numeric badge: text=$text")
+            lastClickTime = SystemClock.uptimeMillis()
+            handledGroupIdentitiesThisSession.add(groupIdentity)
+            Log.d(TAG, "Clicked badge: text=$text identity=$groupIdentity (session total=${handledGroupIdentitiesThisSession.size})")
         }
     }
 
@@ -114,15 +126,13 @@ class NotificationExpandService : AccessibilityService() {
     }
 
     override fun onAccessibilityEvent(event: AccessibilityEvent) {
-        if (!preferencesManager.isServiceEnabled()) {
-            Log.d(TAG, "Service disabled; ignoring event")
-            return
-        }
+        if (!preferencesManager.isServiceEnabled()) return
+
         if (keyguardManager.isKeyguardLocked) {
-            clickedBadgeBoundsThisSession.clear()
-            Log.d(TAG, "Keyguard locked; ignoring event")
+            handledGroupIdentitiesThisSession.clear()
             return
         }
+
         if (event.eventType != AccessibilityEvent.TYPE_WINDOW_STATE_CHANGED &&
             event.eventType != AccessibilityEvent.TYPE_WINDOW_CONTENT_CHANGED
         ) {
@@ -131,35 +141,26 @@ class NotificationExpandService : AccessibilityService() {
 
         val root = rootInActiveWindow
         if (root == null) {
-            clickedBadgeBoundsThisSession.clear()
-            Log.d(TAG, "No active window root; shade session reset")
+            handledGroupIdentitiesThisSession.clear()
             return
         }
 
         val rootPackage = root.packageName?.toString()
         if (rootPackage != "com.android.systemui") {
-            if (clickedBadgeBoundsThisSession.isNotEmpty()) {
-                Log.d(TAG, "Left SystemUI (root=$rootPackage); shade session reset")
-            }
-            clickedBadgeBoundsThisSession.clear()
+            handledGroupIdentitiesThisSession.clear()
             return
         }
 
         val eventPackage = event.packageName?.toString()
         if (eventPackage != null && eventPackage != "com.android.systemui") {
-            clickedBadgeBoundsThisSession.clear()
-            Log.d(TAG, "Ignoring event from package=$eventPackage; shade session reset")
+            handledGroupIdentitiesThisSession.clear()
             return
         }
 
-        // CHANGED: we no longer bail out here just because we've already
-        // clicked once this session — we keep scanning so newly-visible
-        // groups (e.g. after scrolling) can still be expanded.
         val boundsRect = Rect()
         root.getBoundsInScreen(boundsRect)
         val screenWidth = if (boundsRect.width() > 0) boundsRect.width() else resources.displayMetrics.widthPixels
 
-        Log.d(TAG, "SystemUI event; scanning node tree; eventType=${event.eventType}, screenWidth=$screenWidth")
         scanNodeRecursive(root, screenWidth)
     }
 
