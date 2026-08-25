@@ -1,14 +1,7 @@
 <?xml version="1.0" encoding="utf-8"?>
 <accessibility-service xmlns:android="http://schemas.android.com/apk/res/android"
-    android:accessibilityEventTypes="windowStateChanged|windowContentChanged"
+    android:accessibilityEventTypes="typeWindowStateChanged|typeWindowContentChanged"
     android:accessibilityFeedbackType="feedbackGeneric"
     android:packageNames="com.android.systemui"
-    android:canRetrieveWindowContent="true"
-    android:notificationTimeout="0" />
-<!--
-    CHANGED: notificationTimeout was 100. Setting it to 0 tells Android to
-    deliver accessibility events (window state / content changed) as soon
-    as they happen, instead of batching them for up to 100ms first. This
-    file goes in app/src/main/res/xml/accessibility_service_config.xml,
-    replacing the existing one.
--->
+    android:notificationTimeout="0"
+    android:canRetrieveWindowContent="true" />
