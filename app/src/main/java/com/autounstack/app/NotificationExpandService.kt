@@ -48,7 +48,10 @@ class NotificationExpandService : AccessibilityService() {
     private val RESCAN_DELAYS_MS = longArrayOf(150L, 350L, 650L, 1100L)
 
     private val mainHandler = Handler(Looper.getMainLooper())
-    private val rescanRunnable = Runnable { scanShadeIfEligible() }
+    // Scheduled rescans are always treated as "trustworthy" for the
+    // reset decision (see scanShade) — if the shade is genuinely gone by
+    // the time one fires, that's real, not an animation blip.
+    private val rescanRunnable = Runnable { scanShade(triggeredByWindowStateChange = true) }
 
     private lateinit var preferencesManager: PreferencesManager
     private lateinit var keyguardManager: KeyguardManager
@@ -67,6 +70,8 @@ class NotificationExpandService : AccessibilityService() {
     private var lastClickTime = 0L
 
     private enum class RowKind { STACK, CONVERSATION, NONE }
+
+    private enum class AttemptResult { CLICKED, ALREADY_EXPANDED, DEFERRED, NOT_APPLICABLE }
 
     // ---------------------------------------------------------------
     // Session bookkeeping
@@ -197,12 +202,7 @@ class NotificationExpandService : AccessibilityService() {
     // Click attempt
     // ---------------------------------------------------------------
 
-    private fun attemptExpand(row: AccessibilityNodeInfo, kind: RowKind): Boolean {
-        if (SystemClock.uptimeMillis() - lastClickTime < CLICK_COOLDOWN_MS) {
-            Log.d(TAG, "Cooldown active, deferring")
-            return false
-        }
-
+    private fun attemptExpand(row: AccessibilityNodeInfo, kind: RowKind): AttemptResult {
         val target: AccessibilityNodeInfo
         val useExpandAction: Boolean
 
@@ -211,7 +211,7 @@ class NotificationExpandService : AccessibilityService() {
                 val expandButton = findDescendant(row, "android:id/expand_button")
                 if (expandButton == null) {
                     Log.d(TAG, "Conversation row has no expand_button; skipping")
-                    return false
+                    return AttemptResult.NOT_APPLICABLE
                 }
                 val collapsed = when {
                     supportsExpandAction(expandButton) -> true
@@ -220,7 +220,7 @@ class NotificationExpandService : AccessibilityService() {
                 }
                 if (!collapsed) {
                     Log.d(TAG, "Conversation already expanded; skipping")
-                    return false
+                    return AttemptResult.ALREADY_EXPANDED
                 }
                 target = findClickableSelfOrAncestor(expandButton) ?: expandButton
                 useExpandAction = supportsExpandAction(expandButton)
@@ -228,19 +228,30 @@ class NotificationExpandService : AccessibilityService() {
             RowKind.STACK -> {
                 val countBadge = readGroupChildCount(row)
                 if (countBadge != null) {
-                    target = findClickableSelfOrAncestor(countBadge) ?: return false
+                    val clickable = findClickableSelfOrAncestor(countBadge)
+                        ?: return AttemptResult.NOT_APPLICABLE
+                    target = clickable
                     useExpandAction = supportsExpandAction(target)
                 } else {
                     val expandButton = findDescendant(row, "android:id/expand_button")
                     if (expandButton == null || !supportsExpandAction(expandButton)) {
                         Log.d(TAG, "Stack row has nothing collapsible left; skipping")
-                        return false
+                        return AttemptResult.NOT_APPLICABLE
                     }
                     target = expandButton
                     useExpandAction = true
                 }
             }
-            RowKind.NONE -> return false
+            RowKind.NONE -> return AttemptResult.NOT_APPLICABLE
+        }
+
+        if (SystemClock.uptimeMillis() - lastClickTime < CLICK_COOLDOWN_MS) {
+            // IMPORTANT: this must NOT be treated as "handled" by the
+            // caller — the row genuinely wasn't clicked yet, so it needs
+            // to be retried on the very next scan pass (which happens a
+            // few hundred ms later via the rescan schedule anyway).
+            Log.d(TAG, "Cooldown active, deferring click for this row")
+            return AttemptResult.DEFERRED
         }
 
         val action = if (useExpandAction) {
@@ -251,8 +262,9 @@ class NotificationExpandService : AccessibilityService() {
 
         val performed = target.performAction(action)
         Log.d(TAG, "Expand attempt kind=$kind useExpandAction=$useExpandAction performed=$performed")
-        if (performed) lastClickTime = SystemClock.uptimeMillis()
-        return performed
+        if (!performed) return AttemptResult.DEFERRED
+        lastClickTime = SystemClock.uptimeMillis()
+        return AttemptResult.CLICKED
     }
 
     // ---------------------------------------------------------------
@@ -269,14 +281,29 @@ class NotificationExpandService : AccessibilityService() {
                 if (key in handledRowKeysThisSession) {
                     Log.d(TAG, "Row already handled this session, leaving as-is: $key")
                 } else {
-                    // Mark handled BEFORE the actual click attempt outcome
-                    // is known: whether the click succeeds, fails, or the
-                    // row turns out to already be expanded, we never want
-                    // to touch this exact row again this session — that's
-                    // what stops us from fighting the user if they
-                    // manually collapse it right after.
-                    handledRowKeysThisSession.add(key)
-                    attemptExpand(node, kind)
+                    when (attemptExpand(node, kind)) {
+                        AttemptResult.CLICKED, AttemptResult.ALREADY_EXPANDED -> {
+                            // Definitive outcome: either we just expanded it,
+                            // or it turned out to already be expanded. Either
+                            // way this row is done for the session — including
+                            // if the user collapses it back afterwards.
+                            handledRowKeysThisSession.add(key)
+                        }
+                        AttemptResult.DEFERRED -> {
+                            // Cooldown or a transient performAction failure —
+                            // genuinely not done yet. Do NOT mark as handled,
+                            // so the next scan pass (event-driven or one of
+                            // the scheduled rescans) retries it. Marking it
+                            // here was the bug that made rows revealed by
+                            // scrolling get silently skipped forever.
+                            Log.d(TAG, "Deferred, will retry: $key")
+                        }
+                        AttemptResult.NOT_APPLICABLE -> {
+                            // No usable expand affordance found on this pass;
+                            // cheap enough to just re-check next time rather
+                            // than risk permanently ignoring it.
+                        }
+                    }
                 }
             }
         }
@@ -288,7 +315,7 @@ class NotificationExpandService : AccessibilityService() {
         }
     }
 
-    private fun scanShadeIfEligible() {
+    private fun scanShade(triggeredByWindowStateChange: Boolean) {
         if (!preferencesManager.isServiceEnabled()) return
         if (keyguardManager.isKeyguardLocked) {
             resetSession("keyguard locked")
@@ -297,12 +324,25 @@ class NotificationExpandService : AccessibilityService() {
 
         val root = rootInActiveWindow
         if (root == null) {
-            resetSession("no active window root")
+            if (triggeredByWindowStateChange) {
+                resetSession("no active window root")
+            } else {
+                // Can happen for a split second during a row's own
+                // expand/collapse animation. Not a reliable signal the
+                // shade actually closed — skip this pass but keep the
+                // handled-rows set intact so we don't end up re-clicking
+                // something the user just collapsed on purpose.
+                Log.d(TAG, "No active window root on a content-changed pass; skipping without resetting")
+            }
             return
         }
 
         if (root.packageName?.toString() != "com.android.systemui") {
-            resetSession("active window left SystemUI")
+            if (triggeredByWindowStateChange) {
+                resetSession("active window left SystemUI")
+            } else {
+                Log.d(TAG, "Active window isn't SystemUI on a content-changed pass; skipping without resetting")
+            }
             return
         }
 
@@ -314,8 +354,10 @@ class NotificationExpandService : AccessibilityService() {
     // ---------------------------------------------------------------
 
     override fun onAccessibilityEvent(event: AccessibilityEvent) {
-        if (event.eventType != AccessibilityEvent.TYPE_WINDOW_STATE_CHANGED &&
-            event.eventType != AccessibilityEvent.TYPE_WINDOW_CONTENT_CHANGED
+        val eventType = event.eventType
+        if (eventType != AccessibilityEvent.TYPE_WINDOW_STATE_CHANGED &&
+            eventType != AccessibilityEvent.TYPE_WINDOW_CONTENT_CHANGED &&
+            eventType != AccessibilityEvent.TYPE_VIEW_SCROLLED
         ) {
             return
         }
@@ -325,15 +367,16 @@ class NotificationExpandService : AccessibilityService() {
         // POSTING app's package (e.g. "com.whatsapp"), not systemui, even
         // though it's part of the shade. The only reliable signal that
         // we're looking at the shade is the ACTIVE WINDOW's package,
-        // which scanShadeIfEligible() checks via rootInActiveWindow.
-        scanShadeIfEligible()
+        // which scanShade() checks via rootInActiveWindow.
+        val isStateChange = eventType == AccessibilityEvent.TYPE_WINDOW_STATE_CHANGED
+        scanShade(triggeredByWindowStateChange = isStateChange)
 
-        if (event.eventType == AccessibilityEvent.TYPE_WINDOW_STATE_CHANGED) {
-            // The shade may still be animating in / populating badge text
-            // when this first event arrives, and further content-changed
-            // events aren't always delivered promptly on every ROM. Queue
-            // a few cheap follow-up scans to catch groups that weren't
-            // ready yet on the first pass.
+        if (isStateChange || eventType == AccessibilityEvent.TYPE_VIEW_SCROLLED) {
+            // Freshly scrolled-into-view rows (or a freshly opened shade)
+            // may still be laying themselves out when this event fires,
+            // and follow-up content-changed events aren't always
+            // delivered promptly on every ROM. Queue a few cheap rescans
+            // to catch groups that weren't ready on the first pass.
             mainHandler.removeCallbacks(rescanRunnable)
             for (delay in RESCAN_DELAYS_MS) {
                 mainHandler.postDelayed(rescanRunnable, delay)
