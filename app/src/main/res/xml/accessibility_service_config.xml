@@ -2,6 +2,22 @@
 <accessibility-service xmlns:android="http://schemas.android.com/apk/res/android"
     android:accessibilityEventTypes="typeWindowStateChanged|typeWindowContentChanged"
     android:accessibilityFeedbackType="feedbackGeneric"
-    android:packageNames="com.android.systemui"
     android:notificationTimeout="0"
     android:canRetrieveWindowContent="true" />
+    <!--
+      NOTE: android:packageNames was removed on purpose.
+
+      Individual notification rows inside the shade report their OWN
+      AccessibilityEvent.packageName as the app that posted them (e.g.
+      "com.whatsapp"), not "com.android.systemui" — even though they live
+      inside SystemUI's window. With packageNames locked to systemui, the
+      OS silently drops every content-changed event coming from a
+      notification's own view (which is most of them), so the service only
+      ever sees the initial WINDOW_STATE_CHANGED and effectively stops
+      reacting to newly expanded/collapsed groups.
+
+      We now filter in code instead, based on the ACTIVE WINDOW's package
+      (rootInActiveWindow.packageName), which is always "com.android.systemui"
+      while the shade is open regardless of which app's notification
+      changed. See NotificationExpandService.onAccessibilityEvent().
+    -->
