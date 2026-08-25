@@ -2,9 +2,22 @@
 <accessibility-service xmlns:android="http://schemas.android.com/apk/res/android"
     android:accessibilityEventTypes="typeWindowStateChanged|typeWindowContentChanged"
     android:accessibilityFeedbackType="feedbackGeneric"
+    android:accessibilityFlags="flagReportViewIds"
     android:notificationTimeout="0"
     android:canRetrieveWindowContent="true" />
     <!--
+      NOTE: android:accessibilityFlags="flagReportViewIds" is required.
+
+      NotificationExpandService.kt identifies rows/buttons by their
+      resource-id (e.g. "com.android.systemui:id/expandableNotificationRow",
+      "android:id/expand_button", "android:id/group_child_count_number").
+      Without flagReportViewIds, AccessibilityNodeInfo.getViewIdResourceName()
+      silently returns null for every node (privacy restriction), so every
+      resource-id comparison fails and the service never finds anything to
+      click — with no crash or error to point at it. If you add more
+      resource-id-based checks later, this flag is why they'd otherwise do
+      nothing.
+
       NOTE: android:packageNames was removed on purpose.
 
       Individual notification rows inside the shade report their OWN
